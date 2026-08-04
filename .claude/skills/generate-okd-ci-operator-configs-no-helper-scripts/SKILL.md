@@ -1,5 +1,5 @@
 ---
-name: generate-okd-ci-operator-configs
+name: generate-okd-ci-operator-configs-no-helper-scripts
 description: Generate OKD/SCOS ci-operator configuration YAML files from ART ocp-build-data. Replicates the logic of doozer's `images:okd prs open` command as a standalone tool.
 argument-hint: "<ocp-build-data-path> [--okd-version <version>] [--output-dir <path>] [--github-token <token>]"
 ---
@@ -16,6 +16,7 @@ Parse from: $ARGUMENTS
 - `--github-token <token>`: GitHub personal access token for downloading upstream Dockerfiles. If omitted, uses unauthenticated requests (subject to rate limits)
 
 If no ocp-build-data path is provided, search these locations in order:
+
 - `./tmp-dir/ocp-build-data/`
 - `../ocp-build-data/`
 - `./ocp-build-data/`
@@ -33,6 +34,7 @@ This skill generates ci-operator configuration YAML files that tell Prow how to 
 ### Step 1: Validate inputs and read group config
 
 Read `{ocp-build-data}/group.yml` and extract:
+
 - `vars.MAJOR` and `vars.MINOR` (integers)
 - `public_upstreams` (list of `{private, public, public_branch?}` mappings)
 
@@ -69,7 +71,7 @@ Follow these steps exactly:
    - Its `for_payload` field is `true`
    - It is referenced as `from.member` by any image that is needed for OKD payload
    - It is referenced as `from.builder[].member` by any image that is needed for OKD payload
-   This requires building a dependency graph and recursively marking images as needed.
+     This requires building a dependency graph and recursively marking images as needed.
 
 5. **Filter images.** For each image, skip it if ANY of these conditions apply:
    - `content.source.okd_alignment.enabled` is explicitly `false` (if the key is absent, the image is NOT skipped)
@@ -81,32 +83,32 @@ Follow these steps exactly:
 6. **For each remaining image, compute:**
 
    a. **payload_tag**: The tag name for this image in the CI imagestream.
-      - If `content.source.okd_alignment.tag_name` is set, use it
-      - Else if `for_payload` is true: use `payload_name` if set, otherwise take the last path component of `name` and strip the `ose-` prefix if present
-      - Else (non-payload builder/base image): take the last path component of `name` and strip the `ose-` prefix
+   - If `content.source.okd_alignment.tag_name` is set, use it
+   - Else if `for_payload` is true: use `payload_name` if set, otherwise take the last path component of `name` and strip the `ose-` prefix if present
+   - Else (non-payload builder/base image): take the last path component of `name` and strip the `ose-` prefix
 
    b. **desired_parents**: A list of OKD pullspecs for all FROM stages.
-      - If `content.source.okd_alignment.from` exists: use it directly as the list of pullspecs
-      - Otherwise, resolve each `from.builder[]` entry and then the `from.member`/`from.stream`/`from.image` entry using these resolution rules:
-        - For `member` entries: find the referenced image's metadata and resolve its OKD pullspec (see Image OKD Pullspec Resolution below)
-        - For `stream` entries: resolve via Stream Resolution rules below
-        - For `image` entries: use the literal pullspec as-is
+   - If `content.source.okd_alignment.from` exists: use it directly as the list of pullspecs
+   - Otherwise, resolve each `from.builder[]` entry and then the `from.member`/`from.stream`/`from.image` entry using these resolution rules:
+     - For `member` entries: find the referenced image's metadata and resolve its OKD pullspec (see Image OKD Pullspec Resolution below)
+     - For `stream` entries: resolve via Stream Resolution rules below
+     - For `image` entries: use the literal pullspec as-is
 
    c. **public_url and public_branch**: Map the private source git URL to its public equivalent using `public_upstreams`:
-      - For each mapping in `public_upstreams`, check if the image's HTTPS-normalized source URL starts with the HTTPS-normalized private URL
-      - Use the longest matching private prefix
-      - Replace the matched prefix with the corresponding public URL
-      - If the mapping has a `public_branch`, use it; otherwise fall back to the source branch
+   - For each mapping in `public_upstreams`, check if the image's HTTPS-normalized source URL starts with the HTTPS-normalized private URL
+   - Use the longest matching private prefix
+   - Replace the matched prefix with the corresponding public URL
+   - If the mapping has a `public_branch`, use it; otherwise fall back to the source branch
 
-   d. **dockerfile_path**: 
-      - If `content.source.okd_alignment.dockerfile` is set, use it
-      - Else if `content.source.dockerfile` is set, use it
-      - Else default to `"Dockerfile"`
-      - Then prepend the path prefix: if `content.source.okd_alignment.path` is set, join it; else if `content.source.path` is set, join it
+   d. **dockerfile_path**:
+   - If `content.source.okd_alignment.dockerfile` is set, use it
+   - Else if `content.source.dockerfile` is set, use it
+   - Else default to `"Dockerfile"`
+   - Then prepend the path prefix: if `content.source.okd_alignment.path` is set, join it; else if `content.source.path` is set, join it
 
-   e. **build_root**: 
-      - If `content.source.okd_alignment.ci_build_root` is set, resolve it to an OKD pullspec
-      - Otherwise, default to the `rhel-9-golang` stream's upstream_image
+   e. **build_root**:
+   - If `content.source.okd_alignment.ci_build_root` is set, resolve it to an OKD pullspec
+   - Otherwise, default to the `rhel-9-golang` stream's upstream_image
 
    f. **inject_rpm_repositories**: Copy from `content.source.okd_alignment.inject_rpm_repositories` if present
 
@@ -150,6 +152,7 @@ Also write a summary of skipped images to `OCP_BUILD_DATA_PATH/../okd_skipped.ya
 ### Stream Resolution Rules
 
 To resolve a stream name to an OKD pullspec:
+
 1. Look up the stream in streams.yml (after variable substitution)
 2. If the stream has `okd.resolve_as.image` → use that value
 3. If the stream has `upstream_image` → use that value
@@ -158,6 +161,7 @@ To resolve a stream name to an OKD pullspec:
 ### Image OKD Pullspec Resolution
 
 To resolve an image metadata entry to an OKD pullspec:
+
 1. If `content.source.okd_alignment.resolve_as.stream` is set → resolve via Stream Resolution
 2. If `content.source.okd_alignment.resolve_as.image` is set → use that literal pullspec
 3. If `content.source.okd_alignment.tag_name` is set → `registry.ci.openshift.org/origin/scos-{okd_version}:{tag_name}`
@@ -166,6 +170,7 @@ To resolve an image metadata entry to an OKD pullspec:
 ### URL Normalization
 
 To normalize a git URL to HTTPS for comparison:
+
 - Strip leading `git@`, `ssh://`, `http://`, `https://`, `git://`
 - Strip trailing `.git`
 - Replace `:` between host and path with `/`
@@ -188,10 +193,12 @@ You are downloading and parsing upstream Dockerfiles for OKD image builds.
 For each image entry:
 
 1. **Download the Dockerfile** from the public GitHub repo:
+
    ```
    curl -sL -H "Authorization: token GITHUB_TOKEN" \
      "https://raw.githubusercontent.com/{org}/{repo_name}/{public_branch}/{dockerfile_path}"
    ```
+
    (Omit the Authorization header if no token is provided.)
 
 2. **Handle symlink-like files**: If the downloaded content is a single line that does NOT start with `FROM` (case-insensitive), treat it as a relative path to the real Dockerfile. Resolve the path relative to the current dockerfile's directory (using `os.path.join(os.path.dirname(dockerfile_path), content.strip())`), download again, AND UPDATE the image's `dockerfile_path` to the resolved path. Repeat until you get a real Dockerfile. This is critical — the final `dockerfile_path` must reflect the resolved location, not the original symlink.
@@ -199,12 +206,13 @@ For each image entry:
 3. **Parse FROM statements**: For each `FROM` line in the Dockerfile, extract:
    - The image pullspec (everything after `FROM` up to `AS` or end of line)
    - The stage name (the name after `AS`, if present; null otherwise)
-   
+
    Record these as a list: `[{image: "...", stage_name: "..." or null}, ...]`
 
 4. **Validate parent count**: The number of FROM statements in the Dockerfile MUST equal the number of entries in `desired_parents`. If they don't match, mark the image as skipped with reason "parent count mismatch".
 
 5. **Write updated manifest** to `MANIFEST_DIR/okd_manifest_with_dockerfiles.yaml`, adding a `dockerfile_froms` field to each image entry:
+
    ```yaml
    dockerfile_froms:
      - image: "registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22"
@@ -244,9 +252,9 @@ For each group:
      - name: TAGS
        value: scos
      # Plus any additional build_args from okd_alignment.build_args
-   dockerfile_path: {dockerfile_path}  # relative to context_dir if set
-   from: {ci_operator_name_of_last_desired_parent}
-   to: {payload_tag}
+   dockerfile_path: { dockerfile_path } # relative to context_dir if set
+   from: { ci_operator_name_of_last_desired_parent }
+   to: { payload_tag }
    ```
 
    **Inputs (builder replacements):** For each FROM stage EXCEPT the last one (i.e., for index 0 through len(dockerfile_froms)-2):
@@ -261,10 +269,10 @@ For each group:
 
    ```yaml
    inputs:
-     {ci_operator_name_of_desired_parent}:
+     { ci_operator_name_of_desired_parent }:
        as:
-         - {stage_name}        # if present
-         - {original_pullspec} # from the Dockerfile
+         - { stage_name } # if present
+         - { original_pullspec } # from the Dockerfile
    ```
 
    **Context dir:** If `context_dir` is set on the image, add it to the image entry. If the `dockerfile_path` starts with the `context_dir`, strip the context_dir prefix from the dockerfile_path.
@@ -272,11 +280,12 @@ For each group:
    **inject_rpm_repositories (raw_steps):** If the image has `inject_rpm_repositories`, generate a `raw_steps` entry:
    - Create an intermediate tag name: `pre-repo-{payload_tag}`
    - Build a `pipeline_image_cache_step` that writes a yum repo file:
+
      ```yaml
      raw_steps:
        - pipeline_image_cache_step:
            commands: |
-             
+
              cat << EOF > /etc/yum.repos.d/art.repo
              [{repo_id}]
              id = {repo_id}
@@ -286,42 +295,43 @@ For each group:
              gpgcheck = 0
              sslverify = false
              skip_if_unavailable = true
-             
+
              EOF
-                 
-           from: {ci_operator_name_of_base_image}
+
+           from: { ci_operator_name_of_base_image }
            to: pre-repo-{payload_tag}
      ```
+
    - Set the image entry's `from` to the intermediate tag instead of the base image name
 
 5. **Assemble the complete config:**
 
    ```yaml
    base_images:
-     {unique_key}:
-       namespace: {namespace}
-       name: {name}
-       tag: {tag}
+     { unique_key }:
+       namespace: { namespace }
+       name: { name }
+       tag: { tag }
    build_root:
      image_stream_tag:
-       namespace: {namespace}
-       name: {name}
-       tag: {tag}
+       namespace: { namespace }
+       name: { name }
+       tag: { tag }
    images:
-     - {image entries from step 4}
+     - { image entries from step 4 }
    promotion:
      to:
        - namespace: origin
          name: scos-{okd_version}
-   raw_steps:    # only if any images have inject_rpm_repositories
-     - {raw_step entries}
+   raw_steps: # only if any images have inject_rpm_repositories
+     - { raw_step entries }
    releases:
      latest:
        integration:
          namespace: origin
          name: scos-{okd_version}
    resources:
-     '*':
+     "*":
        requests:
          cpu: 100m
          memory: 200Mi
@@ -338,6 +348,7 @@ For each group:
 ### Step 5: Report results
 
 After all subagents complete, report:
+
 1. Total number of ci-operator config files generated
 2. List of output file paths
 3. Number of images skipped and summary of reasons
@@ -347,11 +358,12 @@ After all subagents complete, report:
 
 ### ImageCoordinate
 
-A tuple of `(namespace, name, tag)` parsed from a `registry.ci.openshift.org/namespace/name:tag` pullspec. The unique_key is `"{namespace}_{name}_{tag}"`.
+A tuple of `(namespace, name, tag)` parsed from a `registry.ci.openshift.org/namespace/name:tag` pullspec. The unique*key is `"{namespace}*{name}\_{tag}"`.
 
 ### ci-operator config structure
 
 The final YAML file follows the ci-operator configuration schema. Key sections:
+
 - `base_images`: External image dependencies pulled from CI imagestreams
 - `build_root`: The root image used for building (typically a golang builder)
 - `images`: List of images to build, each with FROM, inputs, Dockerfile path, and build args

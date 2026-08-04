@@ -1,5 +1,5 @@
 ---
-name: generate-okd-ci-operator-configs
+name: generate-okd-ci-operator-configs-with-helper-script
 description: Generate OKD/SCOS ci-operator configuration YAML files from ART ocp-build-data. Replicates the logic of doozer's `images:okd prs open` command as a standalone tool.
 argument-hint: "<ocp-build-data-path> <okd-version> [--output-dir <path>] [--github-token <token>] [--dry-run]"
 ---
@@ -17,9 +17,10 @@ Parse from: $ARGUMENTS
 - `--dry-run`: Print what would be generated without writing files
 
 If no arguments provided, look for ocp-build-data in common locations:
+
 - `./tmp-dir/ocp-build-data/`
 - `../ocp-build-data/`
-And derive the OKD version from `group.yml` vars (MAJOR.MINOR).
+  And derive the OKD version from `group.yml` vars (MAJOR.MINOR).
 
 ## What This Skill Does
 
@@ -42,6 +43,7 @@ Check if it exists. If not, inform the user it needs to be created first.
 ### Step 1: Validate inputs
 
 Verify the ocp-build-data path exists and contains the required files:
+
 ```bash
 ls {ocp_build_data_path}/group.yml {ocp_build_data_path}/streams.yml {ocp_build_data_path}/images/
 ```
@@ -55,6 +57,7 @@ Launch **3 subagents in parallel** via the Agent tool:
 Prompt (fill in OCP_BUILD_DATA_PATH and OKD_VERSION):
 
 ---
+
 Read and analyze the ART ocp-build-data at OCP_BUILD_DATA_PATH to build a dependency graph of OKD images.
 
 1. Read `group.yml` — extract `vars.MAJOR`, `vars.MINOR`, and the `public_upstreams` list.
@@ -80,6 +83,7 @@ Read and analyze the ART ocp-build-data at OCP_BUILD_DATA_PATH to build a depend
    - The dockerfile path
 
 Return the results as a structured YAML document written to `OCP_BUILD_DATA_PATH/../okd_image_analysis.yaml` with this schema:
+
 ```yaml
 major: 5
 minor: 0
@@ -104,6 +108,7 @@ images:
     name: "openshift/ose-cluster-node-tuning-rhel9-operator"
     payload_name: "cluster-node-tuning-operator"
 ```
+
 ---
 
 #### Subagent 2: Download and analyze upstream Dockerfiles
@@ -111,9 +116,11 @@ images:
 **Wait for Subagent 1 to complete first**, then read the `okd_image_analysis.yaml` it produced. For each image entry that has a `public_url`:
 
 1. Download the Dockerfile from the public GitHub URL using:
+
    ```bash
    curl -sL "https://raw.githubusercontent.com/{org}/{repo}/{branch}/{dockerfile_path}"
    ```
+
    If a GitHub token is available, add `-H "Authorization: token {TOKEN}"`.
 
 2. Parse each Dockerfile's FROM statements to extract:
@@ -121,6 +128,7 @@ images:
    - The stage name (from `AS <name>`)
 
 3. Write the parsed Dockerfile info back to `okd_dockerfile_analysis.yaml`:
+
    ```yaml
    - distgit_key: "cluster-node-tuning-operator"
      parent_images:
@@ -139,6 +147,7 @@ For each unique (org, repo, branch) combination:
 1. Create the output directory: `{OUTPUT_DIR}/{org}/{repo}/`
 
 2. Build the ci-operator config following this structure:
+
    ```yaml
    base_images:
      {namespace}_{name}_{tag}:
@@ -202,6 +211,7 @@ python3 ~/.claude/skills/generate-okd-ci-operator-configs/generate_okd_ci_config
 ### Step 4: Report results
 
 After generation completes, report:
+
 1. Total number of ci-operator configs generated
 2. List of output files created
 3. Any images that were skipped and why
@@ -212,22 +222,27 @@ After generation completes, report:
 These rules determine how ART image metadata maps to OKD CI pullspecs:
 
 ### Stream Resolution
+
 - If stream has `okd.resolve_as.image` -> use that
 - If stream has `upstream_image` -> use that
 - Otherwise -> use stream's `image` field
 
 ### Image OKD Pullspec Resolution
+
 - If `okd_alignment.resolve_as.stream` -> resolve via stream rules above
 - If `okd_alignment.resolve_as.image` -> use literal pullspec
 - If `okd_alignment.tag_name` set -> `registry.ci.openshift.org/origin/scos-{version}:{tag_name}`
 - Otherwise -> strip `ose-` from image name, use as tag: `registry.ci.openshift.org/origin/scos-{version}:{stripped_name}`
 
 ### Public Upstream URL Resolution
+
 Apply `public_upstreams` mappings from group.yml:
+
 - `https://github.com/openshift-priv/X` -> `https://github.com/openshift/X` (most common)
 - Some repos have specific overrides (e.g. operator-marketplace -> operator-framework/operator-marketplace)
 
 ### Branch Resolution for PRs
+
 - If branch starts with `release-` and we're targeting the master/main version: use `main` or `master` (whichever exists)
 - If branch starts with `release-` and non-master: use `release-{MAJOR}.{MINOR}` or `openshift-{MAJOR}.{MINOR}`
 - If branch starts with `openshift-`: use as-is
