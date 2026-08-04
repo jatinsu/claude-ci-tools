@@ -1,0 +1,40 @@
+base_images:
+  ocp_builder_rhel-9-golang-1.25-openshift-4.22:
+    namespace: ocp
+    name: builder
+    tag: rhel-9-golang-1.25-openshift-4.22
+  origin_scos-4.22_base-stream9:
+    namespace: origin
+    name: scos-4.22
+    tag: base-stream9
+build_root:
+  image_stream_tag:
+    namespace: ocp
+    name: builder
+    tag: rhel-9-golang-1.25-openshift-4.22
+images:
+- build_args:
+  - name: TAGS
+    value: scos
+  dockerfile_path: Dockerfile.ocp
+  from: origin_scos-4.22_base-stream9
+  inputs:
+    ocp_builder_rhel-9-golang-1.25-openshift-4.22:
+      as:
+      - builder
+      - registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22
+  to: coredns
+promotion:
+  to:
+  - namespace: origin
+    name: scos-4.22
+releases:
+  latest:
+    integration:
+      namespace: origin
+      name: scos-4.22
+resources:
+  '*':
+    requests:
+      cpu: 100m
+      memory: 200Mi

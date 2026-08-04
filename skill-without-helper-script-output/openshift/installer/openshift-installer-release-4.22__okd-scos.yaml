@@ -1,0 +1,137 @@
+base_images:
+  ocp_builder_rhel-9-golang-1.25-openshift-4.22:
+    namespace: ocp
+    name: builder
+    tag: rhel-9-golang-1.25-openshift-4.22
+  origin_scos-4.22_base-stream9:
+    namespace: origin
+    name: scos-4.22
+    tag: base-stream9
+  origin_scos-4.22_cli:
+    namespace: origin
+    name: scos-4.22
+    tag: cli
+  origin_scos-4.22_etcd:
+    namespace: origin
+    name: scos-4.22
+    tag: etcd
+  origin_scos-4.22_hyperkube:
+    namespace: origin
+    name: scos-4.22
+    tag: hyperkube
+  origin_scos-4.22_installer-etcd-artifacts:
+    namespace: origin
+    name: scos-4.22
+    tag: installer-etcd-artifacts
+  origin_scos-4.22_installer-kube-apiserver-artifacts:
+    namespace: origin
+    name: scos-4.22
+    tag: installer-kube-apiserver-artifacts
+build_root:
+  image_stream_tag:
+    namespace: ocp
+    name: builder
+    tag: rhel-9-golang-1.25-openshift-4.22
+images:
+- build_args:
+  - name: TAGS
+    value: scos
+  dockerfile_path: images/installer/Dockerfile.upi.ci
+  from: origin_scos-4.22_base-stream9
+  inputs:
+    origin_scos-4.22_installer-kube-apiserver-artifacts:
+      as:
+      - kas-artifacts
+      - registry.ci.openshift.org/ocp/4.22:installer-kube-apiserver-artifacts
+    origin_scos-4.22_installer-etcd-artifacts:
+      as:
+      - etcd-artifacts
+      - registry.ci.openshift.org/ocp/4.22:installer-etcd-artifacts
+    ocp_builder_rhel-9-golang-1.25-openshift-4.22:
+      as:
+      - builder
+      - registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22
+    origin_scos-4.22_cli:
+      as:
+      - cli
+      - registry.ci.openshift.org/ocp/4.22:cli
+  to: upi-installer
+- build_args:
+  - name: TAGS
+    value: scos
+  dockerfile_path: images/baremetal/Dockerfile.ci
+  from: origin_scos-4.22_base-stream9
+  inputs:
+    origin_scos-4.22_etcd:
+      as:
+      - etcd
+      - registry.ci.openshift.org/ocp/4.22:etcd
+    origin_scos-4.22_hyperkube:
+      as:
+      - kas
+      - registry.ci.openshift.org/ocp/4.22:hyperkube
+    ocp_builder_rhel-9-golang-1.25-openshift-4.22:
+      as:
+      - builder
+      - registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22
+  to: baremetal-installer
+- build_args:
+  - name: TAGS
+    value: scos
+  dockerfile_path: images/installer/Dockerfile.ci
+  from: origin_scos-4.22_base-stream9
+  inputs:
+    origin_scos-4.22_installer-kube-apiserver-artifacts:
+      as:
+      - kas-artifacts
+      - registry.ci.openshift.org/ocp/4.22:installer-kube-apiserver-artifacts
+    origin_scos-4.22_installer-etcd-artifacts:
+      as:
+      - etcd-artifacts
+      - registry.ci.openshift.org/ocp/4.22:installer-etcd-artifacts
+    ocp_builder_rhel-9-golang-1.25-openshift-4.22:
+      as:
+      - builder
+      - registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22
+  to: installer
+- build_args:
+  - name: TAGS
+    value: scos
+  dockerfile_path: images/installer-artifacts/Dockerfile.rhel
+  from: origin_scos-4.22_base-stream9
+  inputs:
+    origin_scos-4.22_installer-kube-apiserver-artifacts:
+      as:
+      - kas-artifacts
+      - registry.ci.openshift.org/ocp/4.22:installer-kube-apiserver-artifacts
+    origin_scos-4.22_installer-etcd-artifacts:
+      as:
+      - etcd-artifacts
+      - registry.ci.openshift.org/ocp/4.22:installer-etcd-artifacts
+    ocp_builder_rhel-9-golang-1.25-openshift-4.22:
+      as:
+      - macbuilder
+      - registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22
+      - macarmbuilder
+      - registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22
+      - linuxbuilder
+      - registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22
+      - linuxarmbuilder
+      - registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22
+      - builder
+      - registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22
+  to: installer-artifacts
+promotion:
+  to:
+  - namespace: origin
+    name: scos-4.22
+releases:
+  latest:
+    integration:
+      namespace: origin
+      name: scos-4.22
+resources:
+  '*':
+    requests:
+      cpu: 100m
+      memory: 200Mi

@@ -1,0 +1,66 @@
+base_images:
+  ocp_builder_stream9:
+    namespace: ocp
+    name: builder
+    tag: stream9
+build_root:
+  image_stream_tag:
+    namespace: ocp
+    name: builder
+    tag: rhel-9-golang-1.25-openshift-4.22
+images:
+- build_args:
+  - name: TAGS
+    value: scos
+  dockerfile_path: base/Dockerfile.rhel9
+  from: pre-repo-base-stream9
+  to: base-stream9
+- build_args:
+  - name: TAGS
+    value: scos
+  context_dir: ipfailover/keepalived
+  dockerfile_path: Dockerfile
+  from: base-stream9
+  to: keepalived-ipfailover
+promotion:
+  to:
+  - namespace: origin
+    name: scos-4.22
+raw_steps:
+- pipeline_image_cache_step:
+    commands: '
+
+      cat << EOF > /etc/yum.repos.d/art.repo
+
+      [rhel-9-server-ose]
+
+      id = rhel-9-server-ose
+
+      name = rhel-9-server-ose
+
+      baseurl = http://base-4-22-rhel9.ocp.svc/rhel-9-server-ose
+
+      enabled = 1
+
+      gpgcheck = 0
+
+      sslverify = false
+
+      skip_if_unavailable = true
+
+
+      EOF
+
+      '
+    from: ocp_builder_stream9
+    to: pre-repo-base-stream9
+releases:
+  latest:
+    integration:
+      namespace: origin
+      name: scos-4.22
+resources:
+  '*':
+    requests:
+      cpu: 100m
+      memory: 200Mi
