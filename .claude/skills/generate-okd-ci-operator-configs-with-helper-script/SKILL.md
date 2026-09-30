@@ -244,5 +244,5 @@ Apply `public_upstreams` mappings from group.yml:
 ### Branch Resolution for PRs
 
 - If branch starts with `release-` and we're targeting the master/main version: use `main` or `master` (whichever exists)
-- If branch starts with `release-` and non-master: use `release-{MAJOR}.{MINOR}` or `openshift-{MAJOR}.{MINOR}`
+- If branch starts with `release-` and non-master: use `release-{MAJOR}.{MINOR}`
 - If branch starts with `openshift-`: use as-is
