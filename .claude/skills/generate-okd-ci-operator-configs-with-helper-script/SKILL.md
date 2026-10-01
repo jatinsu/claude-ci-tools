@@ -4,245 +4,82 @@ description: Generate OKD/SCOS ci-operator configuration YAML files from ART ocp
 argument-hint: "<ocp-build-data-path> <okd-version> [--output-dir <path>] [--github-token <token>] [--dry-run]"
 ---
 
-Generate OKD/SCOS ci-operator configuration YAML files for the openshift/release repository from ART image metadata.
+Generate OKD/SCOS ci-operator configuration YAML files for the openshift/release repository from ART image metadata using the bundled Python generator.
 
 ## Arguments
 
 Parse from: $ARGUMENTS
 
-- First argument: path to the ocp-build-data directory (must contain `group.yml`, `streams.yml`, `images/`)
-- Second argument: OKD version string (e.g. `4.18`, `5.0`)
-- `--output-dir <path>`: Directory to write ci-operator configs (default: `./okd-ci-configs`)
-- `--github-token <token>`: GitHub token for downloading upstream Dockerfiles
-- `--dry-run`: Print what would be generated without writing files
+- First argument: path to the ocp-build-data directory (must contain `group.yml`, `streams.yml`, `images/`).
+- Second argument: OKD version string (e.g. `4.18`, `5.0`).
+- `--output-dir <path>`: Directory to write ci-operator configs (default for this skill: `./okd-ci-configs`). In an openshift/release checkout, use its `ci-operator/config/` directory.
+- `--github-token <token>`: Optional GitHub token for downloading upstream Dockerfiles. Requests are unauthenticated when omitted.
+- `--dry-run`: Print generated YAML without writing files. Upstream Dockerfiles are still downloaded.
 
-If no arguments provided, look for ocp-build-data in common locations:
-
-- `./tmp-dir/ocp-build-data/`
-- `../ocp-build-data/`
-  And derive the OKD version from `group.yml` vars (MAJOR.MINOR).
-
-## What This Skill Does
-
-This skill replicates the `doozer images:okd prs open` command logic. It:
-
-1. Reads ART ocp-build-data (group.yml, streams.yml, image metadata YAMLs)
-2. For each image, determines the OKD/SCOS equivalent pullspecs
-3. Downloads upstream Dockerfiles from GitHub to analyze FROM statements
-4. Generates ci-operator configuration YAML files that tell Prow how to build OKD images
-5. Writes configs to `{output-dir}/{org}/{repo}/{org}-{repo}-{branch}__okd-scos.yaml`
+If no arguments are provided, look for ocp-build-data at `./tmp-dir/ocp-build-data/` or `../ocp-build-data/`, and derive the OKD version from `group.yml` vars (`MAJOR.MINOR`). Use build data for the requested release; the OKD version argument controls the destination imagestream and does not change the metadata's branches.
 
 ## Execution
 
-### Step 0: Locate the helper script
+### 1. Locate the bundled helper
 
-The Python helper script is at: `~/.claude/skills/generate-okd-ci-operator-configs/generate_okd_ci_configs.py`
+Set `SKILL_DIR` to the absolute directory containing this `SKILL.md`. The entry point is [generate_okd_ci_configs.py](generate_okd_ci_configs.py) alongside this file.
 
-Check if it exists. If not, inform the user it needs to be created first.
+- In this repository, the skill directory is `.claude/skills/generate-okd-ci-operator-configs-with-helper-script/`.
+- In the ai-helpers CI plugin, it is `${CLAUDE_PLUGIN_ROOT}/skills/generate-okd-ci-operator-configs/`.
 
-### Step 1: Validate inputs
+The entry point imports the sibling [okd_ci_configs package](okd_ci_configs/__init__.py). Keep the whole skill directory together when installing or copying it. Running the entry point by its absolute path works from any working directory without setting `PYTHONPATH` or installing the helper package.
 
-Verify the ocp-build-data path exists and contains the required files:
-
-```bash
-ls {ocp_build_data_path}/group.yml {ocp_build_data_path}/streams.yml {ocp_build_data_path}/images/
-```
-
-### Step 2: Run the generator with subagents
-
-Launch **3 subagents in parallel** via the Agent tool:
-
-#### Subagent 1: Analyze image metadata and resolve dependencies
-
-Prompt (fill in OCP_BUILD_DATA_PATH and OKD_VERSION):
-
----
-
-Read and analyze the ART ocp-build-data at OCP_BUILD_DATA_PATH to build a dependency graph of OKD images.
-
-1. Read `group.yml` — extract `vars.MAJOR`, `vars.MINOR`, and the `public_upstreams` list.
-2. Read `streams.yml` — build a lookup of stream name to `upstream_image` value (and `okd.resolve_as` if present).
-3. List all YAML files in the `images/` directory.
-4. For each image YAML, read it and extract:
-   - `for_payload` (boolean)
-   - `content.source.okd_alignment` config (if any)
-   - `from` config (builders and base image)
-   - `content.source.git.url` and `content.source.git.branch.target`
-   - `name`, `payload_name`
-   - `content.source.dockerfile`
-   - `content.source.path`
-
-5. Build two lists:
-   a. **payload_images**: images where `for_payload: true`
-   b. **builder_images**: images referenced as `from.builder[].member` or `from.member` by payload images
-
-6. For each image in both lists, determine:
-   - The OKD payload tag name (from `okd_alignment.tag_name`, or `payload_name`/`name` with `ose-` prefix stripped)
-   - The public upstream repo URL (map private URLs using `public_upstreams`)
-   - The upstream branch
-   - The dockerfile path
-
-Return the results as a structured YAML document written to `OCP_BUILD_DATA_PATH/../okd_image_analysis.yaml` with this schema:
-
-```yaml
-major: 5
-minor: 0
-okd_version: "5.0"
-streams:
-  rhel-9-golang:
-    upstream_image: "registry.ci.openshift.org/..."
-  ...
-public_upstreams:
-  - private: "..."
-    public: "..."
-images:
-  - distgit_key: "cluster-node-tuning-operator"
-    payload_tag: "cluster-node-tuning-operator"
-    for_payload: true
-    okd_alignment: { ... }
-    from_config: { ... }
-    source_url: "git@github.com:openshift-priv/..."
-    public_url: "https://github.com/openshift/..."
-    branch: "release-5.0"
-    dockerfile_path: "Dockerfile"
-    name: "openshift/ose-cluster-node-tuning-rhel9-operator"
-    payload_name: "cluster-node-tuning-operator"
-```
-
----
-
-#### Subagent 2: Download and analyze upstream Dockerfiles
-
-**Wait for Subagent 1 to complete first**, then read the `okd_image_analysis.yaml` it produced. For each image entry that has a `public_url`:
-
-1. Download the Dockerfile from the public GitHub URL using:
-
-   ```bash
-   curl -sL "https://raw.githubusercontent.com/{org}/{repo}/{branch}/{dockerfile_path}"
-   ```
-
-   If a GitHub token is available, add `-H "Authorization: token {TOKEN}"`.
-
-2. Parse each Dockerfile's FROM statements to extract:
-   - The parent image pullspec
-   - The stage name (from `AS <name>`)
-
-3. Write the parsed Dockerfile info back to `okd_dockerfile_analysis.yaml`:
-
-   ```yaml
-   - distgit_key: "cluster-node-tuning-operator"
-     parent_images:
-       - image: "registry.ci.openshift.org/ocp/builder:..."
-         stage_name: "builder"
-       - image: "registry.ci.openshift.org/ocp/4.16:base-rhel9"
-         stage_name: null
-   ```
-
-#### Subagent 3: Generate ci-operator config YAML files
-
-**Wait for Subagents 1 and 2 to complete**, then read both analysis files and generate the ci-operator configurations.
-
-For each unique (org, repo, branch) combination:
-
-1. Create the output directory: `{OUTPUT_DIR}/{org}/{repo}/`
-
-2. Build the ci-operator config following this structure:
-
-   ```yaml
-   base_images:
-     {namespace}_{name}_{tag}:
-       namespace: {namespace}
-       name: {name}
-       tag: {tag}
-   build_root:
-     image_stream_tag:
-       namespace: {ns}
-       name: {is_name}
-       tag: {tag}
-   images:
-     - build_args:
-       - name: TAGS
-         value: scos
-       dockerfile_path: {path}
-       from: {base_image_ref}
-       inputs:
-         {builder_ref}:
-           as:
-           - {stage_name}
-           - {original_pullspec}
-       to: {payload_tag}
-   promotion:
-     to:
-     - namespace: origin
-       name: scos-{okd_version}
-   releases:
-     latest:
-       integration:
-         namespace: origin
-         name: scos-{okd_version}
-   resources:
-     '*':
-       requests:
-         cpu: 100m
-         memory: 200Mi
-   ```
-
-3. Handle special cases:
-   - `inject_rpm_repositories`: Add `raw_steps` with `pipeline_image_cache_step`
-   - `okd_alignment.build_args`: Append to the default TAGS=scos arg
-   - `okd_alignment.context_dir`: Set context_dir on the image entry
-   - `okd_alignment.ci_build_root`: Use specified build root instead of default
-
-4. Write to `{OUTPUT_DIR}/{org}/{repo}/{org}-{repo}-{branch}__okd-scos.yaml`
-
-### Step 3: Alternatively, use the Python script directly
-
-If the Python helper script exists and has all dependencies, run it:
+Python 3, PyYAML, and requests are required. Use the project's virtual environment if available. Check dependencies with:
 
 ```bash
-python3 ~/.claude/skills/generate-okd-ci-operator-configs/generate_okd_ci_configs.py \
-    --ocp-build-data OCP_BUILD_DATA_PATH \
-    --okd-version OKD_VERSION \
-    --output-dir OUTPUT_DIR \
-    [--github-token TOKEN] \
-    [--dry-run]
+python3 -c 'import yaml, requests'
 ```
 
-### Step 4: Report results
+### 2. Validate inputs and run the generator
 
-After generation completes, report:
+Verify the build-data directory contains `group.yml`, `streams.yml`, and `images/`. Resolve the arguments into `OCP_BUILD_DATA_PATH`, `OKD_VERSION`, and `OUTPUT_DIR`; pass `./okd-ci-configs` explicitly when the skill's output default is used, since the Python CLI requires `--output-dir`.
 
-1. Total number of ci-operator configs generated
-2. List of output files created
-3. Any images that were skipped and why
-4. Any errors encountered (e.g. Dockerfiles that couldn't be downloaded)
+```bash
+python3 "$SKILL_DIR/generate_okd_ci_configs.py" \
+    --ocp-build-data "$OCP_BUILD_DATA_PATH" \
+    --okd-version "$OKD_VERSION" \
+    --output-dir "$OUTPUT_DIR"
+```
 
-## Key Resolution Rules
+Append `--github-token` with the provided token or `--dry-run` when requested.
 
-These rules determine how ART image metadata maps to OKD CI pullspecs:
+The generator reads and substitutes ART metadata, resolves payload dependencies, downloads upstream Dockerfiles, and writes one config per `(org, repo, branch)` to:
 
-### Stream Resolution
+```text
+{output-dir}/{org}/{repo}/{org}-{repo}-{branch}__okd-scos.yaml
+```
 
-- If stream has `okd.resolve_as.image` -> use that
-- If stream has `upstream_image` -> use that
-- Otherwise -> use stream's `image` field
+It handles `okd_alignment` overrides for parent images, Dockerfiles, source paths, context directories, build arguments, build roots, and RPM repository injection.
 
-### Image OKD Pullspec Resolution
+### 3. Report results
 
-- If `okd_alignment.resolve_as.stream` -> resolve via stream rules above
-- If `okd_alignment.resolve_as.image` -> use literal pullspec
-- If `okd_alignment.tag_name` set -> `registry.ci.openshift.org/origin/scos-{version}:{tag_name}`
-- Otherwise -> strip `ose-` from image name, use as tag: `registry.ci.openshift.org/origin/scos-{version}:{stripped_name}`
+Report the generated config count, output paths, skipped images with reasons, and warnings or errors. A successful invocation can still skip images or refuse incomplete repository configs; include those limitations in the report.
 
-### Public Upstream URL Resolution
+For configs generated into an openshift/release checkout, the follow-up generation commands are `make ci-operator-configs` and `make jobs`.
 
-Apply `public_upstreams` mappings from group.yml:
+## Helper layout
 
-- `https://github.com/openshift-priv/X` -> `https://github.com/openshift/X` (most common)
-- Some repos have specific overrides (e.g. operator-marketplace -> operator-framework/operator-marketplace)
+The entry point owns argument parsing and input validation. Read the relevant module when diagnosing or changing a specific part of generation:
 
-### Branch Resolution for PRs
+| Module | Responsibility |
+| --- | --- |
+| [helpers.py](okd_ci_configs/helpers.py) | Git URL normalization, public upstream mappings, variable substitution, and CI image coordinates |
+| [metadata.py](okd_ci_configs/metadata.py) | Load image metadata, resolve OKD tags and pullspecs, and find payload dependencies |
+| [dockerfiles.py](okd_ci_configs/dockerfiles.py) | Download upstream Dockerfiles and parse FROM instructions |
+| [ci_operator.py](okd_ci_configs/ci_operator.py) | Build image/repository configurations and serialize ci-operator YAML |
+| [generator.py](okd_ci_configs/generator.py) | Orchestrate loading, reconciliation, generation, and result reporting |
 
-- If branch starts with `release-` and we're targeting the master/main version: use `main` or `master` (whichever exists)
-- If branch starts with `release-` and non-master: use `release-{MAJOR}.{MINOR}`
-- If branch starts with `openshift-`: use as-is
+When copying this skill into ai-helpers, use `plugins/ci/skills/generate-okd-ci-operator-configs/` and set the frontmatter name to `generate-okd-ci-operator-configs` to match that directory. The helper package needs no plugin manifest registration.
+
+## Key resolution rules
+
+- Streams resolve in order: `okd.resolve_as.image`, `upstream_image`, then `image`.
+- Images with `okd_alignment.resolve_as.stream` or `.image` use the resolved pullspec and are not built by this generator.
+- Otherwise, images use `registry.ci.openshift.org/origin/scos-{version}:{tag}`. The tag comes from `okd_alignment.tag_name`, or `payload_name`/`name` with the `ose-` prefix stripped.
+- Public upstream URLs use the longest matching `public_upstreams` mapping in `group.yml`. A mapping's `public_branch` overrides the source branch; otherwise the source branch is used, with `main` as the fallback when absent.
+- Images explicitly disabled for OKD, lacking usable source or parent metadata, or unnecessary for the payload are skipped. Dockerfile download failures and parent-count mismatches also skip images.
