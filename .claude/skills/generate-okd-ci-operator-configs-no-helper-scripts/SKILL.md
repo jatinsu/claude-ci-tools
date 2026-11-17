@@ -1,7 +1,7 @@
 ---
 name: generate-okd-ci-operator-configs-no-helper-scripts
 description: Generate OKD/SCOS ci-operator configuration YAML files from ART ocp-build-data. Replicates the logic of doozer's `images:okd prs open` command as a standalone tool.
-argument-hint: "<ocp-build-data-path> [--okd-version <version>] [--output-dir <path>] [--github-token <token>]"
+argument-hint: "<ocp-build-data-path> [--okd-version <version>] [--output-dir <path>] [--release-repo <path>] [--base-stream <9|10>] [--github-token <token>]"
 ---
 
 Generate OKD/SCOS ci-operator configuration YAML files for the openshift/release repository from ART image metadata. This skill replicates the core config-generation logic of doozer's `images:okd prs open` command without requiring the doozer runtime, using subagents for parallelization.
@@ -14,6 +14,8 @@ Parse from: $ARGUMENTS
 - `--okd-version <version>`: OKD version string (e.g. `4.18`, `5.0`). If omitted, derived from `group.yml` vars as `{MAJOR}.{MINOR}`
 - `--output-dir <path>`: Directory to write ci-operator config files (default: `./okd-ci-configs`). Files are written at `{output-dir}/{org}/{repo}/{org}-{repo}-{branch}__okd-scos.yaml`
 - `--github-token <token>`: GitHub personal access token for downloading upstream Dockerfiles. If omitted, uses unauthenticated requests (subject to rate limits)
+- `--release-repo <path>`: Path to an openshift/release checkout. Use it whenever one is available. Subagents 1 and 3 read each repo's OCP config from `{release-repo}/ci-operator/config/{org}/{repo}/{org}-{repo}-{branch}.yaml` to check the branch name, image `capabilities` and builder versions. Subagent 3 also reads the content mirror's RPM repo names from `{release-repo}/core-services/release-controller/_repos/`. Without it, skip those checks, use the hardcoded repo-name rule, and say so in the report.
+- `--base-stream <9|10>`: CentOS Stream for the scos base images. Defaults to 10 for OKD 5.1 and later and 9 for earlier versions.
 
 If no ocp-build-data path is provided, search these locations in order:
 
@@ -29,6 +31,15 @@ This skill generates ci-operator configuration YAML files that tell Prow how to 
 2. **Dockerfile Analysis** — Download each image's upstream Dockerfile from GitHub. Parse FROM statements to identify parent images and stage names.
 3. **Config Generation** — For each unique (org, repo, branch) group, assemble a ci-operator config YAML with the correct base_images, build_root, images, promotion, releases, resources, and optional raw_steps.
 
+## Recording fixes
+
+Many rules below exist because a generated 5.0 or 5.1 config was later fixed by hand in openshift/release (PR numbers are in parentheses). Fixes made only to 4.22 configs are deliberately left out. Each subagent must keep two lists and return them with its output:
+
+- `fixes`: every change a rule made, with the image or repo, the old and new value, and the PR number.
+- `checks`: everything a person needs to look at.
+
+Write them to `OCP_BUILD_DATA_PATH/../okd_fixups.yaml` (append, don't overwrite) as `{fixes: [...], checks: [...]}`.
+
 ## Execution
 
 ### Step 1: Validate inputs and read group config
@@ -38,7 +49,7 @@ Read `{ocp-build-data}/group.yml` and extract:
 - `vars.MAJOR` and `vars.MINOR` (integers)
 - `public_upstreams` (list of `{private, public, public_branch?}` mappings)
 
-Derive `okd_version` as `"{MAJOR}.{MINOR}"` if not provided.
+Derive `okd_version` as `"{MAJOR}.{MINOR}"` if not provided. Set `base_stream` from `--base-stream`, or else to 10 for OKD 5.1 and later and 9 for earlier versions. Set `release_repo` from `--release-repo` and check that `{release_repo}/ci-operator/config` exists. Pass `BASE_STREAM` and `RELEASE_REPO` into every subagent prompt along with the paths.
 
 Read `{ocp-build-data}/streams.yml` and apply variable substitution (replace all `{VAR_NAME}` patterns with values from `group.yml` vars). Build a stream lookup table.
 
@@ -52,7 +63,7 @@ Launch one subagent with the Agent tool using the following prompt (substitute t
 
 You are analyzing ART ocp-build-data to determine which images need OKD ci-operator configurations.
 
-**Input:** ocp-build-data at `OCP_BUILD_DATA_PATH`, OKD version `OKD_VERSION`
+**Input:** ocp-build-data at `OCP_BUILD_DATA_PATH`, OKD version `OKD_VERSION`, base stream `BASE_STREAM`, openshift/release checkout `RELEASE_REPO` (may be empty)
 
 **Task:** Read all YAML files, apply variable substitution, filter to OKD-relevant images, and produce a manifest file.
 
@@ -79,6 +90,7 @@ Follow these steps exactly:
    - `content.source.okd_alignment.resolve_as` is set (these images are resolved, not built)
    - The image is not needed for OKD payload construction (from step 4) AND does not have `content.source.okd_alignment.resolve_as.tag_name` set (note: this checks `resolve_as.tag_name`, NOT the top-level `tag_name` — images that only have a top-level `tag_name` but are not needed for payload ARE skipped)
    - The image has no `content.source.git.url` field, or the URL does not contain `github.com`
+   - Its payload_tag (computed in step 6a) is `upi-installer`. UPI isn't tested on OKD (openshift/release#87242). Record the reason in the skipped list.
 
 6. **For each remaining image, compute:**
 
@@ -94,11 +106,17 @@ Follow these steps exactly:
      - For `stream` entries: resolve via Stream Resolution rules below
      - For `image` entries: use the literal pullspec as-is
 
+   b2. **Adjust desired_parents** (skip this step when `okd_alignment.from` was used, since that list is ART's decision):
+   - **dhclient pin (#84562).** For OKD 5.0 and later, if payload_tag is `agent-installer-node-agent`, set the last parent to `registry.ci.openshift.org/origin/scos-4.22:base-stream9`. CS10 has no `dhclient`. Record a fix and skip the stream rule for this image.
+   - **Base stream (#85990).** If BASE_STREAM is 10, replace every `registry.ci.openshift.org/origin/scos-OKD_VERSION:base-stream9` entry with `...:base-stream10`, builder stages included. Record a fix.
+   - **Hand-maintained images.** If payload_tag is `haproxy-router-base`, `haproxy-router-haproxy32` or `haproxy-router-haproxy28`, record a check. These were hand-edited upstream (stream9 pins in #84562, an EL9 compat image for haproxy32 in #86771, haproxy28 retired for 5.1+ in #87955), so a person must compare with the existing config.
+
    c. **public_url and public_branch**: Map the private source git URL to its public equivalent using `public_upstreams`:
    - For each mapping in `public_upstreams`, check if the image's HTTPS-normalized source URL starts with the HTTPS-normalized private URL
    - Use the longest matching private prefix
    - Replace the matched prefix with the corresponding public URL
    - If the mapping has a `public_branch`, use it; otherwise fall back to the source branch
+   - **Branch check (#86173, #85816).** If RELEASE_REPO is set and `RELEASE_REPO/ci-operator/config/{org}/{repo}/{org}-{repo}-{branch}.yaml` doesn't exist, try the alternate name: `release-X.Y` and `openshift-X.Y` swap, as do `master` and `main`. If the alternate's OCP config exists, use that branch and record a fix. If neither exists, keep the branch and record a check. (etcd moved from `openshift-X.Y` to `release-X.Y`, and router moved from `master` to `main`.)
 
    d. **dockerfile_path**:
    - If `content.source.okd_alignment.dockerfile` is set, use it
@@ -231,7 +249,7 @@ After Subagent 2 completes, read the updated manifest. Then launch a subagent to
 
 You are generating ci-operator configuration YAML files for OKD/SCOS builds.
 
-**Input:** Read the manifest at `MANIFEST_WITH_DOCKERFILES_PATH`. Output directory: `OUTPUT_DIR`.
+**Input:** Read the manifest at `MANIFEST_WITH_DOCKERFILES_PATH`. Output directory: `OUTPUT_DIR`. openshift/release checkout: `RELEASE_REPO` (may be empty). OKD version: `OKD_VERSION`.
 
 **Task:** Group images by (org, repo_name, public_branch). For each group, generate one ci-operator config YAML file.
 
@@ -303,8 +321,21 @@ For each group:
      ```
 
    - Set the image entry's `from` to the intermediate tag instead of the base image name
+   - **Fix the mirror host and repo path before writing the repo file** (#84562, #86112). Record each change as a fix.
+     - Rewrite any `base-A-B-rhelN.ocp.svc` host in `baseurl` to use the OKD version (`base-5-0-rhel10` for 5.0). A 5.0 config once pointed at `base-5-1-*`.
+     - The mirror serves each repo at a path equal to its repo id, so the id must be one the mirror defines. For ids of the form `rhel-N-server-ose` (with or without a `-X.Y` suffix):
+       - If RELEASE_REPO is set and `RELEASE_REPO/core-services/release-controller/_repos/ocp-X.Y-rhelN.repo` exists (`rhelN` taken from the mirror host, for example `rhel10` from `base-5-1-rhel10`), read its `[section]` names. Keep the id if it's listed. Otherwise use `rhel-N-server-ose-X.Y` if listed, or else `rhel-N-server-ose` if listed. If none are listed, keep the id and record a check, because the URL will probably return 404.
+       - Otherwise, use the hardcoded rule: RHEL 10 and later get `-X.Y` and RHEL 9 doesn't. This matches the mirror files as of 2026-11. If RELEASE_REPO was set but the file was missing, record a check.
+       - Change the last path segment of `baseurl` to the final id.
 
-5. **Assemble the complete config:**
+   **Capabilities (#84305).** Every image in an `openshift/installer` config gets `capabilities: [intranet]`. Those builds pull RPMs from intranet hosts and fail on build01.
+
+5. **Cross-check against the OCP config** when RELEASE_REPO is set. Read `RELEASE_REPO/ci-operator/config/{org}/{repo}/{org}-{repo}-{branch}.yaml`. If it doesn't exist, skip this step.
+   - **Capabilities.** For each image, find the OCP image with the same `dockerfile_path`. If it has `capabilities` and the generated image doesn't, copy them and record a fix.
+   - **Builder versions (#84589, #88570).** Compare `rhel-N-golang-A.B-openshift-X.Y` builder tags in `base_images`. If the OCP config uses a newer golang or openshift version for the same RHEL major, record a check.
+   - **`.rhel10` Dockerfiles (#88570).** If the OCP config builds a `.rhel10` Dockerfile in the same directory as a generated image's Dockerfile, and the generated one isn't `.rhel10`, record a check. driver-toolkit needed `Dockerfile.rhel10` for 5.1.
+
+6. **Assemble the complete config:**
 
    ```yaml
    base_images:
@@ -318,7 +349,8 @@ For each group:
        name: { name }
        tag: { tag }
    images:
-     - { image entries from step 4 }
+     items:
+       - { image entries from step 4 }
    promotion:
      to:
        - namespace: origin
@@ -337,11 +369,11 @@ For each group:
          memory: 200Mi
    ```
 
-   Key ordering in the output: `base_images`, `build_root`, `images`, `promotion`, `raw_steps`, `releases`, `resources`. Only include sections that have content (e.g. omit `base_images` if there are none, omit `raw_steps` if none exist).
+   Key ordering in the output: `base_images`, `build_root`, `images`, `promotion`, `raw_steps`, `releases`, `resources`. Only include sections that have content (e.g. omit `base_images` if there are none, omit `raw_steps` if none exist). `images` must be an `items` list, because determinize-ci-operator rejects a flat list. `promotion.to` holds only `origin/scos-{okd_version}`, never a `-art` stream (#87110, #87847).
 
-6. **Write the YAML file** using `yaml.safe_dump()` with `default_flow_style=False`.
+7. **Write the YAML file** using `yaml.safe_dump()` with `default_flow_style=False`.
 
-7. **Report** the total number of files written and their paths.
+8. **Report** the total number of files written and their paths.
 
 ---
 
@@ -353,6 +385,22 @@ After all subagents complete, report:
 2. List of output file paths
 3. Number of images skipped and summary of reasons
 4. Any errors encountered
+5. The `fixes` from `okd_fixups.yaml`, summarized by rule (for example, "160 images: base-stream9 changed to base-stream10")
+6. Every `checks` entry, word for word
+7. If RELEASE_REPO was not given, a note that the branch, capabilities and builder checks didn't run
+
+### Step 6: Post-generation checklist
+
+The rules above can't decide these from ART metadata. Go through them before calling the output ready, and report each one that applies:
+
+1. **Missing payload components.** Compare the generated repos with the payload's components. New components (for example kube-vip, karpenter-operator and agentic-skills in 5.1) were left out before and had to be added in openshift/release#85803. Every skipped `for_payload` image belongs in the report.
+2. **openshift/os.** Its okd-scos config must promote only to `origin/scos-X.Y`, never to `scos-X.Y-art` (#87110, #87847). `OPENSHIFT_VERSION` and the `server-ose-X.Y` entries in `YUM_REPO_NAMES` must match the target version (#84660).
+3. **openshift/images.** When the target builds on stream10, the images config must build `base-stream10` from a stream10 RPM cache step, and the mirror mapping needs an `origin_scos-X.Y_base-stream10` entry (#84562).
+4. **Hand-maintained images.** For the router images and any other image named in a check, diff the generated entry against the existing okd-scos config. If the existing config holds a deliberate hand edit, keep it.
+5. **Bumping the dev tip.** Never move main/master configs to a new version with a find-and-replace on version strings. #84431 did that, which kept stream9 and stale `ocp/4.22` aliases that #85990 and #85940 had to fix. Regenerate from build data for the new version.
+6. **Release controller configs.** `openshift-release-main__okd-scos-X.Y.yaml` isn't generated here. Upgrade jobs can't use a `X-scos-stable` stream until it exists, so point them at the nightly stream until then (#85137).
+
+When a new hand fix to generated configs lands in openshift/release, add a rule to the matching subagent prompt with its PR number, and add it to the helper-script skill's `fixups.py` too.
 
 ## Key Data Structures
 
